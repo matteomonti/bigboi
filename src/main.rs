@@ -26,15 +26,27 @@ async fn main() -> std::io::Result<()> {
     println!("Listening on {}", SOCKET_PATH);
 
     loop {
-        let (stream, _) = listener.accept().await?;
-        let set = set.clone();
+        tokio::select! {
+            accepted = listener.accept() => {
+                let (stream, _) = accepted?;
+                let set = set.clone();
 
-        tokio::spawn(async move {
-            if let Err(error) = serve(stream, set).await {
-                eprintln!("Connection error: {}", error);
+                tokio::spawn(async move {
+                    if let Err(error) = serve(stream, set).await {
+                        eprintln!("Connection error: {}", error);
+                    }
+                });
             }
-        });
+
+            _ = tokio::signal::ctrl_c() => {
+                break;
+            }
+        }
     }
+
+    println!("Shutting down");
+
+    Ok(())
 }
 
 mod identity_hasher;
