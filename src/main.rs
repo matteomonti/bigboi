@@ -8,7 +8,6 @@ use std::{
 };
 use tokio::{net::UnixListener, sync::Mutex as AsyncMutex};
 
-const CAPACITY: usize = 1_000_000;
 const SOCKET_PATH: &str = "bigboi.sock";
 const PERSISTENCE_PATH: &str = "bigboi.bin";
 
@@ -17,15 +16,25 @@ pub type Writer = Arc<AsyncMutex<Option<BufWriter<File>>>>;
 
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
-    let mut set: Set = HashSet::with_capacity_and_hasher(
-        CAPACITY,
-        BuildHasherDefault::<IdentityHasher>::default(),
-    );
+    let capacity: Option<usize> = std::env::args().nth(1).map(|arg| {
+        arg.parse()
+            .expect("Capacity must be a non-negative integer")
+    });
+
+    let mut set = {
+        let hasher = BuildHasherDefault::<IdentityHasher>::default();
+
+        match capacity {
+            Some(capacity) => HashSet::with_capacity_and_hasher(capacity, hasher),
+            None => HashSet::with_hasher(hasher),
+        }
+    };
 
     let file = OpenOptions::new()
         .read(true)
         .write(true)
         .create(true)
+        .truncate(false)
         .open(PERSISTENCE_PATH)?;
 
     let mut file = {
