@@ -1,22 +1,58 @@
 use crate::{identity_hasher::IdentityHasher, serve::serve};
 use std::{
     collections::HashSet,
+    fs::{File, OpenOptions},
     hash::BuildHasherDefault,
+    io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write},
     sync::{Arc, Mutex},
 };
-use tokio::net::UnixListener;
+use tokio::{net::UnixListener, sync::Mutex as AsyncMutex};
 
 const CAPACITY: usize = 1_000_000;
 const SOCKET_PATH: &str = "bigboi.sock";
+const PERSISTENCE_PATH: &str = "bigboi.bin";
 
 pub type Set = HashSet<[u8; 16], BuildHasherDefault<IdentityHasher>>;
+pub type Writer = Arc<AsyncMutex<Option<BufWriter<File>>>>;
 
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
-    let set: Arc<Mutex<Set>> = Arc::new(Mutex::new(HashSet::with_capacity_and_hasher(
+    let mut set: Set = HashSet::with_capacity_and_hasher(
         CAPACITY,
         BuildHasherDefault::<IdentityHasher>::default(),
-    )));
+    );
+
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .open(PERSISTENCE_PATH)?;
+
+    let mut file = {
+        let mut reader = BufReader::new(file);
+        let mut buffer = [0u8; 16];
+        let mut loaded: usize = 0;
+
+        loop {
+            match reader.read_exact(&mut buffer) {
+                Ok(()) => {
+                    set.insert(buffer);
+                    loaded += 1;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => break,
+                Err(error) => return Err(error),
+            }
+        }
+
+        println!("Loaded {} entries from {}", loaded, PERSISTENCE_PATH);
+
+        reader.into_inner()
+    };
+
+    file.seek(SeekFrom::End(0))?;
+
+    let set = Arc::new(Mutex::new(set));
+    let writer: Writer = Arc::new(AsyncMutex::new(Some(BufWriter::new(file))));
 
     let listener = {
         let _ = std::fs::remove_file(SOCKET_PATH);
@@ -30,9 +66,10 @@ async fn main() -> std::io::Result<()> {
             accepted = listener.accept() => {
                 let (stream, _) = accepted?;
                 let set = set.clone();
+                let writer = writer.clone();
 
                 tokio::spawn(async move {
-                    if let Err(error) = serve(stream, set).await {
+                    if let Err(error) = serve(stream, set, writer).await {
                         eprintln!("Connection error: {}", error);
                     }
                 });
@@ -45,6 +82,13 @@ async fn main() -> std::io::Result<()> {
     }
 
     println!("Shutting down");
+
+    let taken = writer.lock().await.take();
+
+    if let Some(mut buf_writer) = taken {
+        buf_writer.flush()?;
+        buf_writer.into_inner().unwrap().sync_all()?;
+    }
 
     Ok(())
 }

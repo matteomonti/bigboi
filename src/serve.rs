@@ -1,11 +1,18 @@
-use crate::Set;
-use std::sync::{Arc, Mutex};
+use crate::{Set, Writer};
+use std::{
+    io::Write,
+    sync::{Arc, Mutex},
+};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::UnixStream,
 };
 
-pub async fn serve(mut stream: UnixStream, set: Arc<Mutex<Set>>) -> std::io::Result<()> {
+pub async fn serve(
+    mut stream: UnixStream,
+    set: Arc<Mutex<Set>>,
+    writer: Writer,
+) -> std::io::Result<()> {
     loop {
         let count = {
             let mut buffer = [0u8; 8];
@@ -32,8 +39,24 @@ pub async fn serve(mut stream: UnixStream, set: Arc<Mutex<Set>>) -> std::io::Res
         {
             let mut guard = set.lock().unwrap();
 
-            for (index, hash) in hashes.into_iter().enumerate() {
-                insertions[index] = guard.insert(hash) as u8;
+            for (hash, insertion) in hashes.iter().zip(insertions.iter_mut()) {
+                if guard.insert(*hash) {
+                    *insertion = 1;
+                }
+            }
+        }
+
+        {
+            let mut guard = writer.lock().await;
+
+            let Some(writer) = guard.as_mut() else {
+                return Ok(());
+            };
+
+            for (hash, insertion) in hashes.iter().zip(insertions.iter()) {
+                if *insertion == 1 {
+                    writer.write_all(hash)?;
+                }
             }
         }
 
